@@ -25,6 +25,7 @@
 #include <media/v4l2-subdev.h>
 
 #include "ov5640.h"
+#include "ov5640_regs.h"
 
 #define OV5640_DRIVER_NAME    "ov5640"
 
@@ -76,10 +77,20 @@ static const struct v4l2_frmsize_discrete ov5640_frame_sizes[OV5640_SIZE_LAST] =
     {2592,1944}
 };
 
+struct ov5640_datafmt {
+    enum v4l2_mbus_pixelcode code;
+    enum v4l2_colorspace colorspace;
+};
+
+static const struct ov5640_datafmt ov5640_color_formats[] = {
+    {V4L2_MBUS_FMT_SBGGR10_1X10, V4L2_COLORSPACE_SRGB},
+};
+
 struct ov5640 {
     struct v4l2_subdev subdev;
     struct media_pad pad;
     struct v4l2_rect crop;  /* Sensor window */
+    struct v4l2_rect curr_crop;
     struct v4l2_mbus_framefmt format;
     struct ov5640_platform_data *pdata;
     struct mutex power_lock; /* lock to protect power_count */
@@ -89,6 +100,7 @@ struct ov5640 {
     //struct aptina_pll pll;
     int reset;
     int pwdn;
+    int res_index;
 
     struct v4l2_ctrl_handler ctrls;
     struct v4l2_ctrl *blc_auto;
@@ -100,14 +112,137 @@ static struct ov5640 *to_ov5640(struct v4l2_subdev *sd)
     return container_of(sd, struct ov5640, subdev);
 }
 
-static int ov5640_read(struct i2c_client *client, u8 reg)
+/* Find a data format by a pixel code in an array */
+static const struct ov5640_datafmt
+            *ov5640_find_dataformat(enum v4l2_mbus_pixelcode code)
 {
-    return i2c_smbus_read_word_swapped(client, reg);
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(ov5640_color_formats); i++)
+        if (ov5640_color_formats[i].code == code)
+            return ov5640_color_formats + i;
+
+    return NULL;
 }
 
-static int ov5640_write(struct i2c_client *client, u8 reg, u16 data)
+static int ov5640_read(struct i2c_client *client, u16 reg, u8 * val)
 {
-    return i2c_smbus_write_word_swapped(client, reg, data);
+    int ret;
+    /* We have 16-bit i2c addresses - care for endianess */
+    unsigned char data[2] = { reg >> 8, reg & 0xff };
+
+    ret = i2c_master_send(client, data, 2);
+    if (ret < 2) {
+        dev_err(&client->dev, "%s: i2c read error, reg: %x\n",
+            __func__, reg);
+        return ret < 0 ? ret : -EIO;
+    }
+
+    ret = i2c_master_recv(client, val, 1);
+    if (ret < 1) {
+        dev_err(&client->dev, "%s: i2c read error, reg: %x\n",
+                __func__, reg);
+        return ret < 0 ? ret : -EIO;
+    }
+
+    return 0;
+}
+
+static int ov5640_write(struct i2c_client *client, u16 reg, u8 val)
+{
+    int ret;
+    unsigned char data[3] = { reg >> 8, reg & 0xff, val };
+
+    ret = i2c_master_send(client, data, 3);
+    if (ret < 3) {
+        dev_err(&client->dev, "%s: i2c write error, reg: %x\n",
+            __func__, reg);
+        return ret < 0 ? ret : -EIO;
+    }
+
+    return 0;
+}
+
+static int ov5640_write_array(struct i2c_client *client, struct ov5640_reg *vals)
+{
+    while (vals->addr != 0xffff || vals->val != 0xff) {
+        int ret = ov5640_write(client, vals->addr, vals->val);
+        if (ret < 0)
+            return ret;
+        vals++;
+    }
+
+    dev_dbg(&client->dev, "Register list loaded\n");
+
+    return 0;
+}
+
+static int ov5640_power_on(struct ov5640 * info)
+{
+    return 0;
+}
+
+static int ov5640_power_off(struct ov5640 * info)
+{
+    return 0;
+}
+
+#if 0
+static int ov5640_sw_reset(struct ov5640 * info)
+{
+    return 0;
+}
+#endif
+
+static int ov5640_hw_reset(struct ov5640 * info)
+{
+    return 0;
+}
+
+/**
+ * ov5640_find_size - Find the best match for a requested image capture size
+ * @width: requested image width in pixels
+ * @height: requested image height in pixels
+ *
+ * Find the best match for a requested image capture size.  The best match
+ * is chosen as the nearest match that has the same number or fewer pixels
+ * as the requested size, or the smallest image size if the requested size
+ * has fewer pixels than the smallest image.
+ */
+static int ov5640_find_size(unsigned int request_width,
+                unsigned int request_height)
+{
+    int i = 0;
+    unsigned long requested_pixels = request_width * request_height;
+
+    for (i = 0; i < ARRAY_SIZE(ov5640_frame_sizes); i++) {
+        if (ov5640_frame_sizes[i].height * ov5640_frame_sizes[i].width >= requested_pixels)
+        return i;
+    }
+
+    /* couldn't find a match, return the max size as a default */
+    return OV5640_SIZE_FULL;
+}
+
+/**
+ * ov5640_v4l2_try_fmt_cap - Find the best match for a requested image capture size
+ * @ov5640_frame_size: a ointer to the structure which specifies requested image size
+ * 
+ * Find the best match for a requested image capture size.  The best match
+ * is chosen as the nearest match that has the same number or fewer pixels
+ * as the requested size, or the smallest image size if the requested size
+ * has fewer pixels than the smallest image.
+ */
+static int ov5640_v4l2_try_fmt_cap(struct v4l2_frmsize_discrete * requestedsize) 
+{
+    int isize;
+
+    isize = ov5640_find_size(requestedsize->width,requestedsize->height);
+
+    requestedsize->width = ov5640_frame_sizes[isize].width;
+    requestedsize->height = ov5640_frame_sizes[isize].height;
+
+    return isize;
 }
 
 /* -----------------------------------------------------------------------------
@@ -116,7 +251,10 @@ static int ov5640_write(struct i2c_client *client, u8 reg, u16 data)
 
 static int ov5640_g_chip_ident(struct v4l2_subdev *sd, struct v4l2_dbg_chip_ident *chip)
 {
-    return 0;
+    struct i2c_client * i2c = v4l2_get_subdevdata(sd);
+
+    u8 val;
+    return ov5640_read(i2c, 0x3000, &val);
 }
 
 // NULL static int ov5640_log_status(struct v4l2_subdev *sd);
@@ -140,19 +278,50 @@ static int ov5640_queryctrl(struct v4l2_subdev *sd, struct v4l2_queryctrl *qc)
 // NULL static int (*g_std)(struct v4l2_subdev *sd, v4l2_std_id *norm);
 // NULL static int (*s_std)(struct v4l2_subdev *sd, v4l2_std_id norm);
 // NULL static long (*ioctl)(struct v4l2_subdev *sd, unsigned int cmd, void *arg);
+
 #ifdef CONFIG_VIDEO_ADV_DEBUG
 static int ov5640_g_register(struct v4l2_subdev *sd, struct v4l2_dbg_register *reg)
 {
-    return 0;
+    struct i2c_client *client = v4l2_get_subdevdata(sd);
+    int ret;
+    u8 val;
+
+    if (reg->reg & ~0xffff)
+        return -EINVAL;
+
+    reg->size = 1;
+
+    ret = ov5640_read(client, reg->reg, &val);
+    if (!ret)
+        reg->val = (__u64)val;
+
+    return ret;
 }
 
 static int ov5640_s_register(struct v4l2_subdev *sd, struct v4l2_dbg_register *reg)
 {
-    return 0;
+    struct i2c_client *client = v4l2_get_subdevdata(sd);
+
+    if (reg->reg & ~0xffff || reg->val & ~0xff)
+        return -EINVAL;
+
+    return ov5640_write(client, reg->reg, reg->val);
 }
+
 #endif
+
 static int ov5640_s_power(struct v4l2_subdev *sd, int on)
 {
+    int ret = 0;
+    struct ov5640 * info = to_ov5640(sd);
+
+    if (on) {
+        ret = ov5640_power_on(info);
+        ov5640_hw_reset(info);
+    }
+    else {
+        ret = ov5640_power_off(info);
+    }
     return 0;
 }
 
@@ -201,6 +370,7 @@ static struct v4l2_subdev_core_ops ov5640_subdev_core_ops = {
 // NULL static int ov5640_querystd)(struct v4l2_subdev *sd, v4l2_std_id *std);
 // NULL static int ov5640_g_tvnorms_output)(struct v4l2_subdev *sd, v4l2_std_id *std);
 // NULL static int ov5640__input_status)(struct v4l2_subdev *sd, u32 *status);
+
 static int ov5640_s_stream(struct v4l2_subdev *subdev, int enable)
 {
     return 0;
@@ -224,16 +394,75 @@ static int ov5640_s_stream(struct v4l2_subdev *subdev, int enable)
 // NULL static int ov5640_enum_dv_timings)(struct v4l2_subdev *sd, struct v4l2_enum_dv_timings *timings);
 // NULL static int ov5640_query_dv_timings)(struct v4l2_subdev *sd, struct v4l2_dv_timings *timings);
 // NULL static int ov5640_dv_timings_cap)(struct v4l2_subdev *sd, struct v4l2_dv_timings_cap *cap);
-// NULL static int ov5640_enum_mbus_fmt)(struct v4l2_subdev *sd, unsigned int index, enum v4l2_mbus_pixelcode *code);
+
+static int ov5640_enum_mbus_fmt(struct v4l2_subdev *sd, unsigned int index, enum v4l2_mbus_pixelcode *code)
+{
+    if (index >= ARRAY_SIZE(ov5640_color_formats))
+        return -EINVAL;
+    *code = ov5640_color_formats[index].code;
+
+    return 0;
+}
+
 // NULL static int ov5640_enum_mbus_fsizes)(struct v4l2_subdev *sd, struct v4l2_frmsizeenum *fsize);
-// NULL static int ov5640_g_mbus_fmt)(struct v4l2_subdev *sd, struct v4l2_mbus_framefmt *fmt);
-// NULL static int ov5640_try_mbus_fmt)(struct v4l2_subdev *sd, struct v4l2_mbus_framefmt *fmt);
-// NULL static int ov5640_s_mbus_fmt)(struct v4l2_subdev *sd, struct v4l2_mbus_framefmt *fmt);
+
+static int ov5640_g_mbus_fmt(struct v4l2_subdev *sd, struct v4l2_mbus_framefmt *fmt)
+{
+    struct ov5640 * info = to_ov5640(sd);
+
+    *fmt = info->format;
+
+    return 0;
+}
+
+static int ov5640_try_mbus_fmt(struct v4l2_subdev *sd, struct v4l2_mbus_framefmt *fmt)
+{
+    struct ov5640 * info = to_ov5640(sd);
+
+    const struct ov5640_datafmt * try_fmt = ov5640_find_dataformat(fmt->code);
+
+    fmt->width = info->crop.width;
+    fmt->height = info->crop.height;
+
+    if (!try_fmt) {
+        fmt->code    = try_fmt->code;
+        fmt->colorspace  = try_fmt->colorspace;
+    }
+
+    fmt->field   = V4L2_FIELD_NONE;
+
+    return 0;
+}
+
+static int ov5640_s_mbus_fmt(struct v4l2_subdev *sd, struct v4l2_mbus_framefmt *fmt)
+{
+    struct ov5640 * info = to_ov5640(sd);
+    const struct ov5640_datafmt * try_fmt = ov5640_find_dataformat(fmt->code);
+
+    if (ov5640_find_dataformat(fmt->code))
+        return -EINVAL;
+
+    ov5640_try_mbus_fmt(sd, fmt);
+
+    if (try_fmt) {
+        info->format.code = try_fmt->code;
+        info->format.colorspace = try_fmt->colorspace;
+    }
+    else {
+        return -EINVAL;
+    }
+
+    return 0;
+}
 // NULL static int ov5640_g_mbus_config)(struct v4l2_subdev *sd, struct v4l2_mbus_config *cfg);
 // NULL static int ov5640_s_mbus_config)(struct v4l2_subdev *sd, const struct v4l2_mbus_config *cfg);
 
 static struct v4l2_subdev_video_ops ov5640_subdev_video_ops = {
     .s_stream       = ov5640_s_stream,
+    .enum_mbus_fmt = ov5640_enum_mbus_fmt,
+    .g_mbus_fmt = ov5640_g_mbus_fmt,
+    .try_mbus_fmt = ov5640_try_mbus_fmt,
+    .s_mbus_fmt = ov5640_s_mbus_fmt,
 };
 
 /* -----------------------------------------------------------------------------
@@ -261,6 +490,16 @@ static int ov5640_enum_frame_size(struct v4l2_subdev *subdev,
                    struct v4l2_subdev_fh *fh,
                    struct v4l2_subdev_frame_size_enum *fse)
 {
+    struct ov5640 * info = container_of(subdev, struct ov5640, subdev);
+
+    if (fse->index >= OV5640_SIZE_LAST || fse->code != info->format.code)
+        return -EINVAL;
+
+    fse->min_width = ov5640_frame_sizes[fse->index].width;
+    fse->max_width = fse->min_width;
+    fse->min_height = ov5640_frame_sizes[fse->index].height;
+    fse->max_height = fse->min_height;
+
     return 0;
 }
 
@@ -271,31 +510,91 @@ static int ov5640_enum_frame_interval(struct v4l2_subdev *sd,
     return 0;
 }
 
-static int ov5640_get_fmt(struct v4l2_subdev *subdev,
+static struct v4l2_mbus_framefmt *
+__ov5640_get_pad_format(struct ov5640 * info, struct v4l2_subdev_fh * fh,
+            unsigned int pad, u32 which)
+{
+    switch (which) {
+        case V4L2_SUBDEV_FORMAT_TRY:
+            return v4l2_subdev_get_try_format(fh, pad);
+        case V4L2_SUBDEV_FORMAT_ACTIVE:
+            return &info->format;
+        default:
+            return NULL;
+    }
+}
+
+static int ov5640_get_fmt(struct v4l2_subdev *sd,
                   struct v4l2_subdev_fh *fh,
                   struct v4l2_subdev_format *fmt)
 {
+    struct ov5640 * info = to_ov5640(sd);
+
+    fmt->format = *(__ov5640_get_pad_format(info, fh, fmt->pad, fmt->which));
+
     return 0;
 }
 
-static int ov5640_set_fmt(struct v4l2_subdev *subdev,
+static int ov5640_set_fmt(struct v4l2_subdev * sd,
                   struct v4l2_subdev_fh *fh,
                   struct v4l2_subdev_format *format)
 {
+    struct ov5640 * info = to_ov5640(sd);
+    struct v4l2_frmsize_discrete size;
+
+    size.height     = format->format.height;
+    size.width  = format->format.width; 
+    info->res_index       = ov5640_v4l2_try_fmt_cap(&size);
+    info->crop.width      = size.width;
+    info->crop.height     = size.height;
+    info->curr_crop.width     = size.width;
+    info->curr_crop.height    = size.height;
+    info->format.width        = size.width;
+    info->format.height       = size.height;
+    info->format.code         = V4L2_MBUS_FMT_SBGGR10_1X10;
+
+    format->format.width        = size.width;
+    format->format.height       = size.height;
+
     return 0;
 }
 
-static int ov5640_get_crop(struct v4l2_subdev *subdev,
+static int ov5640_get_crop(struct v4l2_subdev * sd,
                 struct v4l2_subdev_fh *fh,
                 struct v4l2_subdev_crop *crop)
 {
+    struct ov5640 * info = to_ov5640(sd);
+
+    crop->rect.left = info->crop.left;
+    crop->rect.top = info->crop.top;
+    crop->rect.width      = info->crop.width;
+    crop->rect.height     = info->crop.height;
+    crop->which         = 0;
+
     return 0;
 }
 
-static int ov5640_set_crop(struct v4l2_subdev *subdev,
+static int ov5640_set_crop(struct v4l2_subdev * sd,
                 struct v4l2_subdev_fh *fh,
                 struct v4l2_subdev_crop *crop)
 {
+    struct ov5640 * info = to_ov5640(sd);
+    struct v4l2_frmsize_discrete size;
+
+    size.height     = crop->rect.height;
+    size.width  = crop->rect.width; 
+    info->res_index       = ov5640_v4l2_try_fmt_cap(&size);
+    info->crop.width      = size.width;
+    info->crop.height     = size.height;
+    info->curr_crop.width     = size.width;
+    info->curr_crop.height    = size.height;
+    info->format.width        = size.width;
+    info->format.height       = size.height;
+    info->format.code         = V4L2_MBUS_FMT_SBGGR10_1X10;   
+
+    crop->rect.width        = size.width;
+    crop->rect.height       = size.height;
+
     return 0;
 }
 
@@ -324,19 +623,49 @@ static struct v4l2_subdev_pad_ops ov5640_subdev_pad_ops = {
  * V4L2 subdev internal operations
  */
 
-static int ov5640_registered(struct v4l2_subdev *subdev)
+static int ov5640_registered(struct v4l2_subdev * sd)
 {
+    struct i2c_client * i2c = v4l2_get_subdevdata(sd);
+    struct ov5640 * info = to_ov5640(sd);
+
+    int ret;
+
+    ret = ov5640_power_on(info);
+    if (ret < 0) {
+        dev_err(&i2c->dev, "OV5640 power up failed\n");
+        return ret;
+    }
+
+    ret = ov5640_power_off(info);
     return 0;
 }
 
-static int ov5640_open(struct v4l2_subdev *subdev, struct v4l2_subdev_fh *fh)
+static int ov5640_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 {
+    struct i2c_client * i2c = v4l2_get_subdevdata(sd);
+    struct ov5640 * info = to_ov5640(sd);
+    int ret = 0;
+
+    info->crop.width = ov5640_frame_sizes[OV5640_SIZE_FULL].width;
+    info->crop.height = ov5640_frame_sizes[OV5640_SIZE_FULL].height;
+    info->crop.left = 0;
+    info->crop.top = 0;
+
+    info->format.code = V4L2_MBUS_FMT_SGRBG12_1X12;
+    info->format.width = info->crop.width;
+    info->format.height = info->crop.height;
+    info->format.field = V4L2_FIELD_NONE;
+    info->format.colorspace = V4L2_COLORSPACE_SRGB;
+
+    ret = ov5640_s_power(sd, 1);
+
+    ov5640_write_array(i2c, init_table);
     return 0;
 }
 
 static int ov5640_close(struct v4l2_subdev *subdev, struct v4l2_subdev_fh *fh)
 {
-    return 0;
+    return ov5640_s_power(subdev, 0);
 }
 
 static const struct v4l2_subdev_internal_ops ov5640_subdev_internal_ops = {
@@ -352,6 +681,12 @@ static const struct v4l2_subdev_internal_ops ov5640_subdev_internal_ops = {
  
 static int ov5640_s_ctrl(struct v4l2_ctrl *ctrl)
 {
+
+    switch (ctrl->id) {
+    case V4L2_CID_EXPOSURE_AUTO:
+    default:
+        break;
+    }
     return 0;
 }
 
