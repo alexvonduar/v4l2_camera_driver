@@ -18,6 +18,7 @@
 #include <linux/pm.h>
 #include <linux/slab.h>
 #include <linux/videodev2.h>
+#include <linux/v4l2-mediabus.h>
 
 #include <media/v4l2-chip-ident.h>
 #include <media/v4l2-ctrls.h>
@@ -273,6 +274,26 @@ static int ov5640_v4l2_try_fmt_cap(struct v4l2_frmsize_discrete * requestedsize)
 }
 
 /* -----------------------------------------------------------------------------
+ * V4L2 subdev control operations
+ */
+
+static int ov5640_s_ctrl(struct v4l2_ctrl * ctrl)
+{
+    dev_dbg(NULL, "[OV5640] %s: set control\n", __func__);
+
+    switch (ctrl->id) {
+    case V4L2_CID_EXPOSURE_AUTO:
+    default:
+        break;
+    }
+    return 0;
+}
+
+static struct v4l2_ctrl_ops ov5640_ctrl_ops = {
+    .s_ctrl = ov5640_s_ctrl,
+};
+
+/* -----------------------------------------------------------------------------
  * V4L2 subdev core operations
  */
 
@@ -296,6 +317,7 @@ static int ov5640_g_chip_ident(struct v4l2_subdev * sd, struct v4l2_dbg_chip_ide
 /* supported controls */
 static struct v4l2_ctrl_config ov5640_ctrls[] = {
     {
+        .ops = &ov5640_ctrl_ops,
         .id = V4L2_CID_GAIN,
         .type = V4L2_CTRL_TYPE_INTEGER,
         .name = "Gain",
@@ -305,6 +327,7 @@ static struct v4l2_ctrl_config ov5640_ctrls[] = {
         .def = 0x0020,
         .flags = 0,
     }, {
+        .ops = &ov5640_ctrl_ops,
         .id = V4L2_CID_EXPOSURE,
         .type = V4L2_CTRL_TYPE_INTEGER,
         .name = "Exposure",
@@ -314,6 +337,7 @@ static struct v4l2_ctrl_config ov5640_ctrls[] = {
         .def = 0x01fc,
         .flags = 0,
     }, {
+        .ops = &ov5640_ctrl_ops,
         .id = V4L2_CID_RED_BALANCE,
         .type = V4L2_CTRL_TYPE_INTEGER,
         .name = "Red Balance",
@@ -323,6 +347,7 @@ static struct v4l2_ctrl_config ov5640_ctrls[] = {
         .def = 0,
         .flags = 0,
     }, {
+        .ops = &ov5640_ctrl_ops,
         .id = V4L2_CID_BLUE_BALANCE,
         .type = V4L2_CTRL_TYPE_INTEGER,
         .name = "Blue Balance",
@@ -332,6 +357,7 @@ static struct v4l2_ctrl_config ov5640_ctrls[] = {
         .def = 0,
         .flags = 0,
     }, {
+        .ops = &ov5640_ctrl_ops,
         .id      = V4L2_CID_HFLIP,
         .type    = V4L2_CTRL_TYPE_BOOLEAN,
         .name    = "Mirror",
@@ -341,6 +367,7 @@ static struct v4l2_ctrl_config ov5640_ctrls[] = {
         .def = 0,
         .flags = 0,
     }, {
+        .ops = &ov5640_ctrl_ops,
         .id      = V4L2_CID_VFLIP,
         .type    = V4L2_CTRL_TYPE_BOOLEAN,
         .name    = "Vflip",
@@ -353,7 +380,7 @@ static struct v4l2_ctrl_config ov5640_ctrls[] = {
     }
 };
 
-static void copy_ctrl_config_query(struct v4l2_queryctrl * qc, struct v4l2_ctrl_config * cc)
+static void __copy_ctrl_config_query(struct v4l2_queryctrl * qc, struct v4l2_ctrl_config * cc)
 {
     qc->id = cc->id;
     qc->type = cc->type;
@@ -374,7 +401,7 @@ static int ov5640_queryctrl(struct v4l2_subdev * sd, struct v4l2_queryctrl * qc)
 
     for (i = 0; i < ARRAY_SIZE(ov5640_ctrls); i++)
         if (qc->id && qc->id == ov5640_ctrls[i].id) {
-            copy_ctrl_config_query(qc, &(ov5640_ctrls[i]));
+            __copy_ctrl_config_query(qc, &(ov5640_ctrls[i]));
             return 0;
         }
 
@@ -494,6 +521,9 @@ static struct v4l2_subdev_core_ops ov5640_subdev_core_ops = {
 
 static int ov5640_s_stream(struct v4l2_subdev * sd, int enable)
 {
+    struct i2c_client * i2c = v4l2_get_subdevdata(sd);
+
+    dev_dbg(&i2c->dev, "[OV5640] %s: start stream\n", __func__);
     return 0;
 }
 
@@ -848,26 +878,6 @@ static const struct v4l2_subdev_internal_ops ov5640_subdev_internal_ops = {
     .close = ov5640_close,
 };
 
-/* -----------------------------------------------------------------------------
- * V4L2 subdev control operations
- */
- 
-static int ov5640_s_ctrl(struct v4l2_ctrl *ctrl)
-{
-    dev_dbg(NULL, "[OV5640] %s: get mbus format\n", __func__);
-
-    switch (ctrl->id) {
-    case V4L2_CID_EXPOSURE_AUTO:
-    default:
-        break;
-    }
-    return 0;
-}
-
-static struct v4l2_ctrl_ops ov5640_ctrl_ops = {
-    .s_ctrl = ov5640_s_ctrl,
-};
-
 static struct v4l2_subdev_ops ov5640_subdev_ops = {
     .core   = &ov5640_subdev_core_ops,
     .video  = &ov5640_subdev_video_ops,
@@ -910,13 +920,17 @@ static int ov5640_probe(struct i2c_client * i2c, const struct i2c_device_id * di
 
     v4l2_ctrl_handler_init(&ov5640->ctrls, ARRAY_SIZE(ov5640_ctrls) + 4);
 
-    v4l2_ctrl_new_std(&ov5640->ctrls, &ov5640_ctrl_ops,
-              V4L2_CID_HFLIP, 0, 1, 1, 0);
-    v4l2_ctrl_new_std(&ov5640->ctrls, &ov5640_ctrl_ops,
-              V4L2_CID_VFLIP, 0, 1, 1, 0);
+    for (i = 0; i < ARRAY_SIZE(ov5640_ctrls); ++i) {
+        if (ov5640_ctrls[i].name)
+            v4l2_ctrl_new_custom(&ov5640->ctrls, &ov5640_ctrls[i], NULL);
 
-    for (i = 0; i < ARRAY_SIZE(ov5640_ctrls); ++i)
-        v4l2_ctrl_new_custom(&ov5640->ctrls, &ov5640_ctrls[i], NULL);
+        if (ov5640->ctrls.error) {
+            dev_warn(&i2c->dev, "%s: control initializ %s error %d\n",
+                   __func__, ov5640_ctrls[i].name, ov5640->ctrls.error);
+            ret = ov5640->ctrls.error;
+            goto done;
+        }
+    }
 
     ov5640->subdev.ctrl_handler = &ov5640->ctrls;
 
@@ -987,7 +1001,7 @@ static int ov5640_remove(struct i2c_client * i2c)
     struct v4l2_subdev * subdev = i2c_get_clientdata(i2c);
     struct ov5640 * ov5640 = to_ov5640(subdev);
 
-    dev_dbg(&i2c->dev, "[OV5640] %s: get mbus format\n", __func__);
+    dev_dbg(&i2c->dev, "[OV5640] %s: remove driver\n", __func__);
 
     v4l2_ctrl_handler_free(&ov5640->ctrls);
     v4l2_device_unregister_subdev(subdev);
