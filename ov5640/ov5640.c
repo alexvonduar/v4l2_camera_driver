@@ -28,6 +28,11 @@
 #include "ov5640.h"
 #include "ov5640_regs.h"
 
+#if defined(CONFIG_DBG)
+#undef dev_dbg
+#define dev_dbg(dev, format, arg...) dev_printk(KERN_DEBUG, dev, format, ##arg)
+#endif
+
 #define OV5640_DRIVER_NAME    "ov5640"
 
 #define OV5640_GPIO_RESET 98
